@@ -1,0 +1,23 @@
+fastapi==0.95.0
+uvicorn[standard]==0.22.0
+
+# database
+SQLAlchemy==2.0.44
+PyMySQL==1.1.0
+
+# validation
+pydantic==1.10.24
+email-validator==2.0.0
+
+# env file support
+python-dotenv==1.0.0
+
+# HTTP client for n8n webhooks
+httpx==0.24.1
+
+# password hashing
+passlib==1.7.4
+bcrypt==4.0.1
+
+# JWT
+python-jose[cryptography]==3.3.0
