@@ -20,7 +20,8 @@ async def chat_websocket(websocket: WebSocket):
             
         payload = verify_jwt(token=token, secret_key=settings.SECRET_KEY, algorithm=settings.ALGORITHM)
         user_id = payload["id"]
-    except:
+    except Exception as e:
+        print(e)
         await websocket.close(code=4001)
         return
 

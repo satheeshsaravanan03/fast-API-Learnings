@@ -22,6 +22,18 @@ class SignInRequest(BaseModel):
     email: EmailStr
     password: str
 
+class VerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP code")
+    new_password: str = Field(..., min_length=6, description="New password with strong requirements")
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., description="Current password")
+    new_password: str = Field(..., min_length=6, description="New password with strong requirements")
+
 class UserData(BaseModel):
     id: str
     email: str

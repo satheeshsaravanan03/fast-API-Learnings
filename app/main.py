@@ -14,7 +14,11 @@ from app.websocket.chat_socket import chat_websocket
 # Initialize logging
 setup_logging()
 
-app = FastAPI()
+app = FastAPI(
+    swagger_ui_parameters={
+        "persistAuthorization": True 
+    }
+)
 
 log_info(context="APP_STARTUP", message="FastAPI application started")
 
@@ -45,6 +49,9 @@ app.add_middleware(
     allow_methods=["*"],  # GET, POST, PUT, DELETE...
     allow_headers=["*"],  # Authorization, Content-Type, etc.
 )
+
+# Swagger UI will automatically pick up HTTPBearer from route dependencies
+# No need for custom OpenAPI configuration
 
 
 @app.websocket("/chat")

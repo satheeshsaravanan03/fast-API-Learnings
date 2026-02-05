@@ -28,17 +28,11 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXP_TIME : int
     REFRESH_SECRET_KEY : str
 
-    # Email Verification Configuration
-    VERIFICATION_TOKEN_EXP_TIME: int = 10  # JWT token expiry for email verification (minutes)
-    TEMP_PASSWORD_EXPIRY_MINUTES: int = 15  # Temporary password expiry time (minutes)
+    # Email Verification Configuration (OTP-based)
+    OTP_EXPIRY_MINUTES: int = 10  # OTP expiry time in minutes
 
-    # n8n Webhook URLs (Placeholders - update with actual n8n webhook URLs)
-    N8N_WEBHOOK_VERIFICATION_EMAIL: str = "http://localhost:5678/webhook/verification-email"
-    N8N_WEBHOOK_TEMP_PASSWORD_EMAIL: str = "http://localhost:5678/webhook/temp-password-email"
-    N8N_WEBHOOK_PASSWORD_CHANGED_EMAIL: str = "http://localhost:5678/webhook/password-changed-email"
-
-    # Frontend URL (fallback if Origin header not present)
-    FRONTEND_URL: str = "http://localhost:3000"
+    # n8n Webhook Configuration
+    N8N_WEBHOOK_BASE_URL: str = "http://localhost:5678/webhook"
 
     # Logging Configuration
     LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL

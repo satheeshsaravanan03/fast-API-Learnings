@@ -1,4 +1,5 @@
 from fastapi import Request, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.utils.auth_utils import verify_jwt
 from app.config.env_config import settings
 from app.exceptions.custom_exception import CustomException
@@ -6,14 +7,22 @@ from app.constants.error import ERROR
 from app.schema.user_schema import UserData
 from app.utils.logger_utils import handle_middleware_error
 
-def auth_middleware(request: Request):
+# Create HTTPBearer instance for Swagger UI integration
+security = HTTPBearer()
+
+def auth_middleware(request: Request, credentials: HTTPAuthorizationCredentials = None):
     try:
-        token = request.headers.get("Authorization")
-        if token is None:
-            raise HTTPException(status_code=401, detail="Authorization header missing")
-        
-        if token.startswith("Bearer "):
-            token = token[7:]   
+        # First try to get token from HTTPBearer (Swagger UI)
+        if credentials:
+            token = credentials.credentials
+        else:
+            # Fallback to manual header parsing (for other clients)
+            token = request.headers.get("Authorization")
+            if token is None:
+                raise HTTPException(status_code=401, detail="Authorization header missing")
+
+            if token.startswith("Bearer "):
+                token = token[7:]
 
         user = verify_jwt(
             token=token,
@@ -23,7 +32,6 @@ def auth_middleware(request: Request):
 
         if not user:
             raise ERROR.UNAUTHORIZED
-
 
         request.state.user = UserData(**user)
 

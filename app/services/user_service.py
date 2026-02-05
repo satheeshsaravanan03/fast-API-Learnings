@@ -1,18 +1,43 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import text
-from app.schema.user_schema import CreateUserRequest, UpdateUserRequest, SignInRequest, UserData, ChangePasswordRequest
+from app.schema.user_schema import CreateUserRequest, UpdateUserRequest, SignInRequest, UserData
 from app.exceptions import CustomException
 from app.constants.error import ERROR
 import uuid
 from app.utils.auth_utils import verify_password, hash_password, generate_jwt, verify_jwt
 from app.config.env_config import settings
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
-import secrets
-import string
+import random
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters long"
+
+    if not re.search(r'[A-Z]', password):
+        return False, "Password must contain at least one uppercase letter"
+
+    if not re.search(r'[a-z]', password):
+        return False, "Password must contain at least one lowercase letter"
+
+    if not re.search(r'\d', password):
+        return False, "Password must contain at least one number"
+
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>_\-+=\[\]\\;/~`]', password):
+        return False, "Password must contain at least one special character (!@#$%^&*(),.?\":{}|<>_-+=[]\\;/~`)"
+
+    return True, ""
+
+
+def generate_otp() -> str:
+    """Generate a 6-digit OTP code"""
+    return ''.join([str(random.randint(0, 9)) for _ in range(6)])
 
 
 def get_user_info(db: Session, id: str, page: int, size: int):
@@ -106,32 +131,37 @@ def get_user_info(db: Session, id: str, page: int, size: int):
 
 def create_user(db: Session, data: CreateUserRequest):
     """
-    Create new user without password (will be set after email verification)
-    Returns user object and verification JWT token using raw SQL INSERT
+    Create new user without password (will be set after OTP verification)
+    Returns user object and 6-digit OTP code using raw SQL INSERT
     """
     try:
         user_id = str(uuid.uuid4())
         current_time = datetime.utcnow()
+        otp = generate_otp()
 
         # Raw SQL INSERT query
         insert_query = text("""
             INSERT INTO users (id, name, email, password, country, profile_url, about,
-                             user_role, is_verified, is_temp_password, created_at, updated_at)
+                             user_role, is_verified, is_temp_password, otp, otp_created_at,
+                             created_at, updated_at)
             VALUES (:id, :name, :email, :password, :country, :profile_url, :about,
-                    :user_role, :is_verified, :is_temp_password, :created_at, :updated_at)
+                    :user_role, :is_verified, :is_temp_password, :otp, :otp_created_at,
+                    :created_at, :updated_at)
         """)
 
         db.execute(insert_query, {
             "id": user_id,
             "name": data.name,
             "email": data.email,
-            "password": None,  # Will be set after email verification
+            "password": None,  # Will be set after OTP verification
             "country": "India",
             "profile_url": data.profile_url,
             "about": data.about,
             "user_role": 1,  # Default user role
             "is_verified": False,
             "is_temp_password": False,
+            "otp": otp,
+            "otp_created_at": current_time,
             "created_at": current_time,
             "updated_at": current_time
         })
@@ -147,19 +177,6 @@ def create_user(db: Session, data: CreateUserRequest):
         result = db.execute(select_query, {"user_id": user_id})
         new_user = result.fetchone()
 
-        # Generate verification JWT token (10 minutes expiry)
-        verification_token_data = {
-            "user_id": user_id,
-            "email": data.email,
-            "purpose": "email_verification"
-        }
-        verification_token = generate_jwt(
-            data=verification_token_data,
-            expire_minutes=settings.VERIFICATION_TOKEN_EXP_TIME,
-            secret_key=settings.SECRET_KEY,
-            algorithm=settings.ALGORITHM
-        )
-
         return {
             "id": new_user.id,
             "name": new_user.name,
@@ -169,7 +186,7 @@ def create_user(db: Session, data: CreateUserRequest):
             "about": new_user.about,
             "is_verified": new_user.is_verified,
             "created_at": new_user.created_at
-        }, verification_token
+        }, otp
 
     except IntegrityError as e:
         db.rollback()
@@ -294,13 +311,12 @@ def delete_user_info(db: Session, user: UserData):
 
 def sign_in_user(db: Session, data: SignInRequest):
     """
-    User signin with temp password expiry check using raw SQL SELECT
+    User signin using raw SQL SELECT
     """
     try:
         # Fetch user by email
         query = text("""
-            SELECT id, name, email, password, profile_url, user_role,
-                   is_verified, is_temp_password, temp_password_created_at
+            SELECT id, name, email, password, profile_url, user_role, is_verified
             FROM users
             WHERE email = :email
         """)
@@ -316,32 +332,12 @@ def sign_in_user(db: Session, data: SignInRequest):
 
         # Check if password is set
         if not user_info.password:
-            raise CustomException(status_code=403, message="Password not set. Please complete email verification.")
+            raise CustomException(status_code=403, message="Password not set. Please complete OTP verification.")
 
         # Verify password
         is_valid = verify_password(password=data.password, hashed=user_info.password)
         if not is_valid:
             raise CustomException(status_code=401, message=ERROR.INVALID_CREDENTIALS)
-
-        # Check if using temporary password
-        must_change_password = False
-        temp_password_expires_in_minutes = None
-
-        if user_info.is_temp_password and user_info.temp_password_created_at:
-            # Calculate time elapsed since temp password was created
-            time_elapsed = datetime.utcnow() - user_info.temp_password_created_at
-            elapsed_minutes = time_elapsed.total_seconds() / 60
-
-            # Check if temp password expired (15 minutes)
-            if elapsed_minutes > settings.TEMP_PASSWORD_EXPIRY_MINUTES:
-                raise CustomException(
-                    status_code=403,
-                    message="Temporary password expired. Please request a new verification email."
-                )
-
-            # Password still valid - user can login but must change password
-            must_change_password = True
-            temp_password_expires_in_minutes = int(settings.TEMP_PASSWORD_EXPIRY_MINUTES - elapsed_minutes)
 
         # Generate JWT tokens
         user_data = {
@@ -368,9 +364,7 @@ def sign_in_user(db: Session, data: SignInRequest):
         return {
             "authToken": auth_token,
             "refreshToken": refresh_token,
-            "user": user_data,
-            "must_change_password": must_change_password,
-            "temp_password_expires_in_minutes": temp_password_expires_in_minutes
+            "user": user_data
         }
 
     except CustomException:
@@ -380,83 +374,118 @@ def sign_in_user(db: Session, data: SignInRequest):
         raise CustomException(status_code=500, message=ERROR.INTERNAL_ERROR)
 
 
-def verify_email_and_set_temp_password(db: Session, token: str):
+def verify_otp_and_set_password(db: Session, email: str, otp: str, new_password: str):
     """
-    Verify email using JWT token and set temporary password using raw SQL UPDATE
+    Verify OTP and set user password using raw SQL UPDATE
     """
     try:
-        # Verify JWT token
-        token_data = verify_jwt(token=token, secret_key=settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-        if not token_data or token_data.get("purpose") != "email_verification":
-            raise CustomException(status_code=400, message="Invalid or expired verification token")
+        # Validate password strength first
+        is_valid, error_message = validate_password_strength(new_password)
+        if not is_valid:
+            raise CustomException(status_code=400, message=error_message)
 
-        user_id = token_data.get("user_id")
-        user_email = token_data.get("email")
-
-        # Check if user exists and not already verified
+        # Check if user exists with matching OTP
         check_query = text("""
-            SELECT id, name, email, is_verified
+            SELECT id, name, email, is_verified, otp, otp_created_at
             FROM users
-            WHERE id = :user_id AND email = :email
+            WHERE email = :email
         """)
-        result = db.execute(check_query, {"user_id": user_id, "email": user_email})
+        result = db.execute(check_query, {"email": email})
         user = result.fetchone()
 
         if not user:
             raise CustomException(status_code=404, message=ERROR.USER_NOT_FOUND)
 
         if user.is_verified:
-            raise CustomException(status_code=400, message="Email already verified")
+            raise CustomException(status_code=400, message="Email already verified. Please login.")
 
-        # Generate random temporary password (8 characters)
-        temp_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%") for _ in range(8))
-        hashed_temp_password = hash_password(temp_password)
+        if not user.otp or not user.otp_created_at:
+            raise CustomException(status_code=400, message="No OTP found. Please request a new verification email.")
 
-        # Update user: set password, mark as verified, set temp password flags
+        # Check if OTP matches
+        if user.otp != otp:
+            raise CustomException(status_code=400, message="Invalid OTP code")
+
+        # Check if OTP expired (10 minutes)
+        time_elapsed = datetime.utcnow() - user.otp_created_at
+        elapsed_minutes = time_elapsed.total_seconds() / 60
+
+        if elapsed_minutes > settings.OTP_EXPIRY_MINUTES:
+            raise CustomException(
+                status_code=400,
+                message="OTP expired. Please request a new verification email."
+            )
+
+        # Hash the new password
+        hashed_password = hash_password(new_password)
+
+        # Update user: set password, mark as verified, clear OTP
         update_query = text("""
             UPDATE users
             SET password = :password,
                 is_verified = :is_verified,
-                is_temp_password = :is_temp_password,
-                temp_password_created_at = :temp_password_created_at,
+                otp = NULL,
+                otp_created_at = NULL,
                 updated_at = :updated_at
             WHERE id = :user_id
         """)
 
         db.execute(update_query, {
-            "password": hashed_temp_password,
+            "password": hashed_password,
             "is_verified": True,
-            "is_temp_password": True,
-            "temp_password_created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
-            "user_id": user_id
+            "user_id": user.id
         })
         db.commit()
 
-        logger.info(f"Email verified and temp password set for user {user_id}")
+        logger.info(f"OTP verified and password set for user {user.id}")
+
+        # Generate JWT tokens for immediate login
+        user_data = {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "profile_url": None,
+            "user_role": 1
+        }
+
+        auth_token = generate_jwt(
+            data=user_data,
+            expire_minutes=settings.ACCESS_TOKEN_EXP_TIME,
+            secret_key=settings.SECRET_KEY,
+            algorithm=settings.ALGORITHM
+        )
+        refresh_token = generate_jwt(
+            data=user_data,
+            expire_minutes=settings.REFRESH_TOKEN_EXP_TIME,
+            secret_key=settings.REFRESH_SECRET_KEY,
+            algorithm=settings.ALGORITHM
+        )
 
         return {
             "user_id": user.id,
             "user_name": user.name,
             "user_email": user.email,
-            "temp_password": temp_password  # Return plain text to send via email
+            "authToken": auth_token,
+            "refreshToken": refresh_token,
+            "user": user_data
         }
 
     except CustomException:
         raise
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Database error in verify_email: {e}", exc_info=True)
+        logger.error(f"Database error in verify_otp_and_set_password: {e}", exc_info=True)
         raise CustomException(status_code=500, message=ERROR.INTERNAL_ERROR)
     except Exception as e:
         db.rollback()
-        logger.error(f"Error verifying email: {e}", exc_info=True)
+        logger.error(f"Error verifying OTP: {e}", exc_info=True)
         raise CustomException(status_code=500, message=ERROR.INTERNAL_ERROR)
 
 
 def resend_verification_email(db: Session, email: str):
     """
-    Resend verification email for unverified user using raw SQL SELECT
+    Resend OTP for unverified user using raw SQL
     """
     try:
         # Check if user exists
@@ -474,57 +503,82 @@ def resend_verification_email(db: Session, email: str):
         if user.is_verified:
             raise CustomException(status_code=400, message="Email already verified. Please login.")
 
-        # Generate new verification token
-        verification_token_data = {
-            "user_id": user.id,
-            "email": user.email,
-            "purpose": "email_verification"
-        }
-        verification_token = generate_jwt(
-            data=verification_token_data,
-            expire_minutes=settings.VERIFICATION_TOKEN_EXP_TIME,
-            secret_key=settings.SECRET_KEY,
-            algorithm=settings.ALGORITHM
-        )
+        # Generate new OTP
+        otp = generate_otp()
+        current_time = datetime.utcnow()
+
+        # Update OTP in database
+        update_query = text("""
+            UPDATE users
+            SET otp = :otp,
+                otp_created_at = :otp_created_at,
+                updated_at = :updated_at
+            WHERE id = :user_id
+        """)
+
+        db.execute(update_query, {
+            "otp": otp,
+            "otp_created_at": current_time,
+            "updated_at": current_time,
+            "user_id": user.id
+        })
+        db.commit()
 
         return {
             "user_id": user.id,
             "user_name": user.name,
             "user_email": user.email,
-            "verification_token": verification_token
+            "otp": otp
         }
 
     except CustomException:
         raise
     except SQLAlchemyError as e:
+        db.rollback()
         logger.error(f"Database error in resend_verification_email: {e}", exc_info=True)
         raise CustomException(status_code=500, message=ERROR.INTERNAL_ERROR)
     except Exception as e:
+        db.rollback()
         logger.error(f"Error in resend_verification_email: {e}", exc_info=True)
         raise CustomException(status_code=500, message=ERROR.INTERNAL_ERROR)
 
 
-def change_password(db: Session, user: UserData, new_password: str):
+def change_password(db: Session, user: UserData, current_password: str, new_password: str):
     """
-    Change user password (from temp to permanent) using raw SQL UPDATE
+    Change user password (requires current password verification) using raw SQL UPDATE
     """
     try:
+        # Fetch user's current password
+        check_query = text("SELECT password FROM users WHERE id = :user_id")
+        result = db.execute(check_query, {"user_id": user.id})
+        user_info = result.fetchone()
+
+        if not user_info or not user_info.password:
+            raise CustomException(status_code=404, message=ERROR.USER_NOT_FOUND)
+
+        # Verify current password
+        is_valid = verify_password(password=current_password, hashed=user_info.password)
+        if not is_valid:
+            raise CustomException(status_code=401, message="Current password is incorrect")
+
+        # Validate new password strength
+        is_valid, error_message = validate_password_strength(new_password)
+        if not is_valid:
+            raise CustomException(status_code=400, message=error_message)
+
         # Hash new password
         hashed_password = hash_password(new_password)
 
-        # Update password and clear temp password flags
+        # Update password
         update_query = text("""
             UPDATE users
             SET password = :password,
-                is_temp_password = :is_temp_password,
-                temp_password_created_at = NULL,
                 updated_at = :updated_at
             WHERE id = :user_id
         """)
 
         db.execute(update_query, {
             "password": hashed_password,
-            "is_temp_password": False,
             "updated_at": datetime.utcnow(),
             "user_id": user.id
         })
@@ -532,16 +586,12 @@ def change_password(db: Session, user: UserData, new_password: str):
 
         logger.info(f"Password changed successfully for user {user.id}")
 
-        # Fetch user details for email notification
-        select_query = text("SELECT name, email FROM users WHERE id = :user_id")
-        result = db.execute(select_query, {"user_id": user.id})
-        user_info = result.fetchone()
-
         return {
-            "user_name": user_info.name,
-            "user_email": user_info.email
+            "password_updated": True
         }
 
+    except CustomException:
+        raise
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Database error in change_password: {e}", exc_info=True)
